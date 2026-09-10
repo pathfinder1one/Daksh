@@ -108,14 +108,14 @@ def _patch_ollama_for_local_gpu():
 
     async def optimized_complete(self, request):
         elapsed = self._timer()
-        max_tok = min(request.max_tokens or 2048, 2048)
+        max_tok = min(request.max_tokens or 1500, 1500)
         payload = {
             "model": request.model or self._default_model,
             "messages": _prepare_payload_messages(self, request.messages),
             "stream": False,
             "options": {
                 "num_gpu": 99,
-                "num_ctx": 4096,
+                "num_ctx": 2048,
                 "temperature": request.temperature or 0.6,
                 "num_predict": max_tok,
             },
@@ -123,7 +123,7 @@ def _patch_ollama_for_local_gpu():
         if request.tools and "ollama.com" not in self._base_url:
             payload["tools"] = request.tools
 
-        async with httpx.AsyncClient(timeout=180.0, headers=self._headers, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, headers=self._headers, verify=False) as client:
             response = await client.post(self._chat_url(), json=payload)
             response.raise_for_status()
             data = response.json()
@@ -151,40 +151,123 @@ def _patch_ollama_for_local_gpu():
         )
 
     async def optimized_stream(self, request):
-        max_tok = min(request.max_tokens or 2048, 2048)
+        max_tok = min(request.max_tokens or 1500, 1500)
         payload = {
             "model": request.model or self._default_model,
             "messages": _prepare_payload_messages(self, request.messages),
             "stream": True,
             "options": {
                 "num_gpu": 99,
-                "num_ctx": 4096,
+                "num_ctx": 2048,
                 "temperature": request.temperature or 0.6,
                 "num_predict": max_tok,
             },
         }
         import json as _json
-        async with httpx.AsyncClient(timeout=180.0, headers=self._headers, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, headers=self._headers, verify=False) as client:
             async with client.stream("POST", self._chat_url(), json=payload) as response:
                 response.raise_for_status()
+                yielded = False
+                thinking_chunks = []
                 async for line in response.aiter_lines():
                     if line:
                         data = _json.loads(line)
                         msg = data.get("message", {})
-                        # Stream only the clean final content, not the internal thinking scratchpad
                         chunk = msg.get("content", "")
                         if chunk:
                             yield chunk
+                            yielded = True
+                        else:
+                            th = msg.get("thinking", "")
+                            if th:
+                                thinking_chunks.append(th)
                         if data.get("done"):
                             break
+                # If model only generated thinking and zero content chunks, fallback to clean thinking draft
+                if not yielded and thinking_chunks:
+                    clean_th = clean_model_output("".join(thinking_chunks))
+                    if clean_th:
+                        yield clean_th
 
     OllamaProvider.complete = optimized_complete
     OllamaProvider.stream = optimized_stream
 
 
+def ensure_ollama_running(host: str = OLLAMA_HOST, auto_start: bool = True) -> bool:
+    """
+    Checks if the local Ollama daemon is running at OLLAMA_HOST.
+    If not running and auto_start is True, attempts to launch 'ollama serve' in background.
+    """
+    import subprocess
+    import time
+    
+    # 1. Quick check if already active
+    try:
+        with httpx.Client(timeout=1.5) as client:
+            res = client.get(host)
+            if res.status_code == 200:
+                return True
+    except Exception:
+        pass
+
+    logger.warning("daksh.ollama.offline", msg=f"Ollama not reachable at {host}.")
+    
+    # 2. Attempt to auto-start if enabled
+    if auto_start:
+        print(f"[*] Ollama service not detected at {host}. Attempting auto-start ('ollama serve')...")
+        try:
+            if sys.platform == "win32":
+                CREATE_NO_WINDOW = 0x08000000
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    creationflags=CREATE_NO_WINDOW,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+
+            # Poll for readiness up to 5 seconds
+            for _ in range(10):
+                time.sleep(0.5)
+                try:
+                    with httpx.Client(timeout=1.0) as client:
+                        res = client.get(host)
+                        if res.status_code == 200:
+                            print(f"[+] Ollama server started successfully at {host}!\n")
+                            return True
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning("daksh.ollama.autostart_failed", error=str(e))
+
+    # 3. Print clear diagnostic message if still unreachable
+    print("\n" + "=" * 75)
+    print("⚠️  OLLAMA SERVER IS NOT RUNNING!")
+    print("=" * 75)
+    print(f"Daksh could not connect to Ollama at {host}.")
+    print("\nWHY THIS HAPPENS:")
+    print("  * Ollama is an independent C++/CUDA background daemon managing GPU memory.")
+    print("  * Running 'python main.py' executes the Python agent client, not the Ollama server.")
+    print("\nHOW TO START OLLAMA:")
+    print("  1. Open a new terminal and run:   ollama serve")
+    print("  2. Or launch the 'Ollama' app from your Start Menu / System Tray.")
+    print("  3. Verify the model is downloaded: ollama pull qwen3.5:4b")
+    print("=" * 75 + "\n")
+    return False
+
+
 def initialize_daksh(model_name: str | None = None):
     """Configures MuktiVerse for local Ollama operation and dynamic agent routing."""
     selected_model = model_name or OLLAMA_MODEL
+
+    # 0. Health check & auto-start Ollama server
+    ensure_ollama_running(OLLAMA_HOST, auto_start=True)
     
     # 1. Apply GPU optimization patch
     _patch_ollama_for_local_gpu()

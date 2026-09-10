@@ -166,6 +166,44 @@ python test_daksh_all.py
 
 ---
 
+## ❓ FAQ & Troubleshooting: Why was Ollama not running when I ran `main.py`?
+
+### The Core Reason: Client vs. Inference Server Architecture
+When you run `python main.py`, you are executing the **Python Agent Command Center** (the orchestrator). However, **Ollama is an independent C++/CUDA background daemon** (inference server) that must listen on `http://localhost:11434`:
+
+```
+┌─────────────────────────────────┐           HTTP (Port 11434)          ┌──────────────────────────────────┐
+│  Daksh Agent Client (main.py)   │ ───────────────────────────────────> │   Ollama Daemon (ollama serve)   │
+│  • Memory, Swarm, Tools, RAG    │ <─────────────────────────────────── │   • Loads Qwen 3.5 onto RTX 4050 │
+└─────────────────────────────────┘                                      └──────────────────────────────────┘
+```
+
+* Running a Python script does **not** automatically install or launch third-party system services by default (similar to how running Django or FastAPI does not start your PostgreSQL database).
+* If your PC was restarted or Ollama was closed, the inference server at port 11434 will be offline, resulting in `[WinError 10061] Connection Refused`.
+
+---
+
+### How Daksh Handles This Automatically
+
+Daksh features an **Auto-Detection & Recovery Shield** in [`config.py`](file:///c:/Coding/My%20Projects/Self/Daksh/config.py):
+1. On startup, `ensure_ollama_running()` pings `http://localhost:11434`.
+2. If Ollama is offline, Daksh automatically attempts to spawn `ollama serve` in the background and polls for readiness.
+3. If Ollama is not installed in the system PATH, it outputs clear diagnostic instructions instead of crashing with a raw traceback.
+
+---
+
+### Manual Fix & Quick Commands
+
+If you ever encounter a connection error, follow these 3 steps:
+
+| Issue | Root Cause | Instant Fix Command |
+|---|---|---|
+| `Connection refused (10061)` | Ollama server is not active | Run `ollama serve` or open Ollama from Start Menu |
+| `Model 'qwen3.5:4b' not found` | Model weights not pulled | Run `ollama pull qwen3.5:4b` |
+| `Redis connection error` | Working memory backend offline | Run `docker run -d -p 6379:6379 redis:alpine` |
+
+---
+
 ## 📂 Repository Structure
 
 ```text

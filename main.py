@@ -38,8 +38,9 @@ async def main():
     initialize_daksh()
     
     agent = DakshAgent()
+    current_mode = "fast"
     print("Daksh is active and ready. Enter any task, query, or mission below.")
-    print("Commands: /status (Subsystems) | /agents (Swarm) | /tools (Sandbox) | /goal <task> (Autonomous Loop) | clear | exit\n")
+    print("Commands: /mode [fast|deep] | /status | /agents | /tools | /goal <task> | clear | exit\n")
 
     while True:
         try:
@@ -52,6 +53,18 @@ async def main():
             if user_input.lower() in ("clear", "/clear"):
                 await agent.clear_memory()
                 print("[Memory cleared.]\n")
+                continue
+            if user_input.lower().startswith("/mode ") or user_input.lower().startswith("mode "):
+                parts = user_input.split()
+                if len(parts) > 1:
+                    new_mode = parts[1].lower()
+                    if new_mode in ("fast", "medium", "deep", "thinking"):
+                        current_mode = "medium" if new_mode == "deep" else new_mode
+                        print(f"[Execution mode set to: '{current_mode.upper()}']\n")
+                    else:
+                        print(f"[Unknown mode '{new_mode}'. Choose: fast, deep, or thinking]\n")
+                else:
+                    print(f"[Current mode: '{current_mode.upper()}'] (Options: fast, deep, thinking)\n")
                 continue
             if user_input.lower() in ("status", "/status", "/subsystems"):
                 print("\n" + "=" * 75)
@@ -97,18 +110,45 @@ async def main():
                 print(f"\n[Iterations: {goal_res.iterations_used} | Success: {goal_res.success} | Latency: {goal_res.total_latency_ms:.0f}ms]\n" + "-" * 75 + "\n")
                 continue
 
+            streamed_any_content = False
+
             async def on_stream(chunk, agent_name, step):
+                nonlocal streamed_any_content
                 if step in ("intent", "planning", "synthesis", "retry"):
+                    if streamed_any_content:
+                        print()
+                        streamed_any_content = False
                     print(f"  ⚡ [{agent_name.title()}] {chunk.strip()}")
                 elif "Starting" in chunk:
+                    if streamed_any_content:
+                        print()
+                        streamed_any_content = False
                     print(f"  ⚙️  {chunk.strip()}")
+                else:
+                    # Live streaming content tokens from specialist agent
+                    if not streamed_any_content:
+                        print("\nDaksh Response:\n", end="", flush=True)
+                        streamed_any_content = True
+                    print(chunk, end="", flush=True)
 
-            print("\n[MuktiVerse Native Cognitive Pipeline Engaged]")
-            res = await agent.execute(user_input, stream_callback=on_stream)
+            print(f"\n[MuktiVerse Native Cognitive Pipeline Engaged | Mode: {current_mode.upper()}]")
+            res = await agent.execute(user_input, stream_callback=on_stream, mode=current_mode)
 
-            if res.response:
-                clean_ans = clean_model_output(res.response)
-                print(f"\nDaksh Response:\n{clean_ans}")
+            if streamed_any_content:
+                print()  # Add newline after live stream finishes
+            else:
+                # Fallback to response or task results if not live-streamed
+                ans = res.response
+                if not ans and res.task_results:
+                    successful = [t for t in res.task_results if t.success and t.content]
+                    if successful:
+                        ans = successful[0].content
+
+                if ans:
+                    clean_ans = clean_model_output(ans)
+                    print(f"\nDaksh Response:\n{clean_ans}")
+                else:
+                    print(f"\nDaksh Response:\n[Task completed.]")
             
             telemetry_info = f"Tasks: {res.tasks_created} | Agents: {', '.join(res.agents_used) if res.agents_used else 'direct'} | Latency: {res.total_latency_ms:.0f}ms | GPU: 100% RTX 4050"
             if res.quality_score is not None:
